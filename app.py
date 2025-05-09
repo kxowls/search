@@ -23,7 +23,8 @@ def split_keywords(keyword_text):
 def normalize_text(text):
     """텍스트 정규화: 공백 제거 및 소문자 변환"""
     if isinstance(text, str):
-        return re.sub(r'\s+', '', text.lower())
+        # 공백을 하나로 통일하고 소문자로 변환
+        return ' '.join(text.lower().split())
     return str(text)
 
 def highlight_keywords(text, keywords):
@@ -38,9 +39,9 @@ def highlight_keywords(text, keywords):
     return highlighted_text
 
 def parse_query(query):
-    query = query.replace('그리고', '&').replace('또는', '|').replace('제외', '-')
-    query = query.replace('AND', '&').replace('OR', '|').replace('NOT', '-')
-    query = query.replace('NEAR', '~').replace('WITHIN', '~')
+    """검색어 파싱: 논리 연산자 변환"""
+    # NOT 연산자 변환 (! -> -)
+    query = re.sub(r'!(\w+)', r'-\1', query)
     return query
 
 def is_near(text, a, b, window=5):
@@ -58,34 +59,43 @@ def is_near(text, a, b, window=5):
     return False
 
 def match_logic(cell, query):
+    """검색 로직: 논리 연산자 처리"""
     cell = normalize_text(str(cell))
-    # NEAR, WITHIN
-    if '~' in query:
-        parts = [p.strip() for p in query.split('~')]
-        if len(parts) == 2:
-            return is_near(cell, parts[0], parts[1])
+    
+    # 괄호 처리
+    if '(' in query and ')' in query:
+        def replace_brackets(match):
+            inner_query = match.group(1)
+            return str(match_logic(cell, inner_query))
+        query = re.sub(r'\((.*?)\)', replace_brackets, query)
+    
     # NOT
     if '-' in query:
         parts = [p.strip() for p in query.split('-')]
         must = parts[0]
         nots = parts[1:]
-        if not all(match_logic(cell, must) for must in must.split('&')):
+        if not match_logic(cell, must):
             return False
-        for n in nots:
-            if any(match_logic(cell, n) for n in n.split('|')):
-                return False
-        return True
+        return not any(normalize_text(n) in cell for n in nots)
+    
     # AND
     if '&' in query:
-        return all(match_logic(cell, q) for q in query.split('&'))
+        parts = [p.strip() for p in query.split('&')]
+        return all(normalize_text(part) in cell for part in parts)
+    
     # OR
     if '|' in query:
-        return any(match_logic(cell, q) for q in query.split('|'))
-    # 인용부호 exact match
+        parts = [p.strip() for p in query.split('|')]
+        return any(normalize_text(part) in cell for part in parts)
+    
+    # 구문 검색 (정확한 문구)
     if query.startswith('"') and query.endswith('"'):
-        return query[1:-1] in cell
-    # 단일 키워드
-    return query.strip() in cell
+        exact_phrase = normalize_text(query[1:-1])
+        return exact_phrase in cell
+    
+    # 단일 키워드 (부분 문자열 매칭)
+    query = normalize_text(query.strip())
+    return query in cell
 
 def process_pdf(file, query):
     results = []
@@ -97,33 +107,57 @@ def process_pdf(file, query):
                 for row_num, row in enumerate(table, 1):
                     cell_texts = [str(cell) if cell else '' for cell in row]
                     if any(match_logic(cell, parsed_query) for cell in cell_texts):
+                        # 내용 컬럼을 문자열로 단순화
                         results.append({
                             '페이지': page_num,
                             '테이블': table_num,
                             '행': row_num,
-                            '내용': cell_texts
+                            '내용': ' | '.join(cell_texts)
                         })
     return pd.DataFrame(results)
 
 def process_excel(file, query):
+    """엑셀 파일 처리: 키워드가 포함된 행 전체 출력"""
     df = pd.read_excel(file)
     parsed_query = parse_query(query)
-    mask = df.astype(str).apply(lambda x: x.apply(lambda cell: match_logic(cell, parsed_query)))
-    return df[mask.any(axis=1)]
+    
+    # 각 행에 대해 검색 수행
+    def search_row(row):
+        # 각 셀의 값을 문자열로 변환하고 공백을 포함한 원본 텍스트로 검색
+        row_text = ' '.join(str(cell).strip() for cell in row if pd.notna(cell))
+        return match_logic(row_text, parsed_query)
+    
+    mask = df.apply(search_row, axis=1)
+    
+    # 검색된 행 전체 반환
+    return df[mask]
 
 def main():
     st.title("📄 문서 키워드 검색 도구")
     st.write("PDF 또는 Excel 파일에서 키워드를 논리연산자와 함께 검색할 수 있습니다.")
+    
+    # 검색 도움말
     st.info("""
-    **검색어 입력 예시**
-    - `파이썬 & 데이터` : 두 키워드 모두 포함
-    - `파이썬 | 자바` : 둘 중 하나라도 포함
-    - `파이썬 -입문` : '파이썬'은 포함, '입문'은 제외
-    - `파이썬 & (데이터 | 분석)` : '파이썬'과 '데이터' 또는 '분석'이 모두 포함
-    - 연산자: `&`(AND), `|`(OR), `-`(NOT)
+    **검색 연산자 사용 가이드**
+    
+    | 연산자 | 의미 | 예시 | 설명 |
+    |--------|------|------|------|
+    | & (AND) | 모두 포함 | `교육 & 심리` | '교육'과 '심리' 모두 포함 |
+    | \| (OR) | 하나라도 포함 | `교육 \| 심리` | '교육' 또는 '심리' 포함 |
+    | ! (NOT) | 제외 | `교육 & !심리` | '교육'은 포함, '심리'는 제외 |
+    | " " | 정확한 문구 | `"아동 발달"` | '아동 발달' 정확히 일치 |
+    | ( ) | 그룹화 | `(교육 \| 심리) & 발달` | '교육' 또는 '심리'를 포함하면서 '발달' 포함 |
+    
+    **💡 검색 팁**
+    - 공백은 무시됩니다 (예: '교육심리' = '교육 심리')
+    - 대소문자를 구분하지 않습니다
+    - 부분 문자열도 검색됩니다 (예: '혼자'로 '혼자공부하는파이썬' 검색 가능)
+    - 엑셀 파일 검색 시 키워드가 포함된 행 전체가 출력됩니다
+    - 여러 연산자를 조합하여 사용할 수 있습니다
     """)
+    
     uploaded_file = st.file_uploader("파일을 업로드하세요", type=['pdf', 'xlsx', 'xls'])
-    query = st.text_input("검색할 키워드를 입력하세요 (논리연산자 사용 가능)")
+    query = st.text_input("검색할 키워드를 입력하세요 (연산자: &, |, !, \"\", ())")
     if uploaded_file and query:
         try:
             if uploaded_file.name.endswith('.pdf'):
@@ -132,7 +166,7 @@ def main():
                 df = process_excel(uploaded_file, query)
             if len(df) > 0:
                 st.success(f"검색 결과: {len(df)}개의 항목을 찾았습니다.")
-                st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                st.dataframe(df, use_container_width=True, hide_index=True)
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df.to_excel(writer, index=False)
