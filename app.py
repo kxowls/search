@@ -51,14 +51,21 @@ def highlight_keywords(text, keywords):
 
 def parse_query(query):
     """검색어 파싱: 논리 연산자 변환"""
+    # 특수 기호 변환
+    query = query.replace('∣', '|')
+    query = query.replace('＆', '&')
+    query = query.replace('！', '!')
+    
     # NOT 연산자 변환 (! -> -)
     query = re.sub(r'!(\w+)', r'-\1', query)
-    # 특수 기호 변환 (∣ -> |)
-    query = query.replace('∣', '|')
+    
+    # 공백 제거
+    query = re.sub(r'\s+', '', query)
+    
     return query
 
 def is_near(text, a, b, window=5):
-    # 텍스트에서 a, b가 window 이내에 등장하는지 확인
+    """텍스트에서 a, b가 window 이내에 등장하는지 확인"""
     text = normalize_text(text)
     a = normalize_text(a)
     b = normalize_text(b)
@@ -71,76 +78,99 @@ def is_near(text, a, b, window=5):
                 return True
     return False
 
-def extract_innermost_brackets(query):
-    """가장 안쪽의 괄호와 그 내용을 찾아서 반환합니다."""
-    pattern = r'\([^()]*\)'
-    match = re.search(pattern, query)
-    if match:
-        return match.group(), match.start(), match.end()
-    return None, -1, -1
+def tokenize_query(query):
+    """쿼리를 토큰으로 분리"""
+    # 괄호, 연산자, 키워드를 분리
+    pattern = r'([()&|!-])|([^()&|!-]+)'
+    tokens = []
+    for match in re.finditer(pattern, query):
+        token = match.group(1) or match.group(2)
+        if token:
+            tokens.append(token)
+    return tokens
 
-def evaluate_simple_query(cell, query):
-    """단순 쿼리 평가: 괄호가 없는 쿼리를 평가합니다."""
+def evaluate_expression(cell, tokens):
+    """토큰화된 표현식을 평가"""
     cell = normalize_text(str(cell))
+    stack = []
+    operators = []
     
-    # NOT
-    if '-' in query:
-        parts = [p.strip() for p in query.split('-')]
-        must = parts[0]
-        nots = parts[1:]
-        if not evaluate_simple_query(cell, must):
-            return False
-        return not any(normalize_text(n) in cell for n in nots)
+    for token in tokens:
+        if token == '(':
+            operators.append(token)
+        elif token == ')':
+            # 괄호 안의 표현식 평가
+            while operators and operators[-1] != '(':
+                op = operators.pop()
+                if op == '&':
+                    b = stack.pop()
+                    a = stack.pop()
+                    stack.append(a and b)
+                elif op == '|':
+                    b = stack.pop()
+                    a = stack.pop()
+                    stack.append(a or b)
+            if operators and operators[-1] == '(':
+                operators.pop()
+        elif token in ['&', '|']:
+            while operators and operators[-1] != '(' and operators[-1] in ['&', '|']:
+                op = operators.pop()
+                if op == '&':
+                    b = stack.pop()
+                    a = stack.pop()
+                    stack.append(a and b)
+                elif op == '|':
+                    b = stack.pop()
+                    a = stack.pop()
+                    stack.append(a or b)
+            operators.append(token)
+        elif token.startswith('-'):
+            # NOT 연산
+            keyword = token[1:]
+            stack.append(normalize_text(keyword) not in cell)
+        elif token.startswith('"') and token.endswith('"'):
+            # 정확한 문구 검색
+            phrase = normalize_text(token[1:-1])
+            stack.append(phrase in cell)
+        else:
+            # 일반 키워드 검색
+            stack.append(normalize_text(token) in cell)
     
-    # AND
-    if '&' in query:
-        parts = [p.strip() for p in query.split('&')]
-        return all(evaluate_simple_query(cell, part) for part in parts)
+    # 남은 연산자 처리
+    while operators:
+        op = operators.pop()
+        if op == '&':
+            b = stack.pop()
+            a = stack.pop()
+            stack.append(a and b)
+        elif op == '|':
+            b = stack.pop()
+            a = stack.pop()
+            stack.append(a or b)
     
-    # OR
-    if '|' in query:
-        parts = [p.strip() for p in query.split('|')]
-        return any(evaluate_simple_query(cell, part) for part in parts)
-    
-    # 구문 검색 (정확한 문구)
-    if query.startswith('"') and query.endswith('"'):
-        exact_phrase = normalize_text(query[1:-1])
-        return exact_phrase in cell
-    
-    # 단일 키워드 (부분 문자열 매칭)
-    query = normalize_text(query.strip())
-    return query in cell
+    return stack[0] if stack else False
 
 def match_logic(cell, query):
     """검색 로직: 중첩된 논리 연산자 처리"""
-    # 괄호가 남아 있는 동안 계속 처리
-    while '(' in query and ')' in query:
-        # 가장 안쪽 괄호와 그 내용을 찾습니다
-        bracket_content, start, end = extract_innermost_brackets(query)
-        if bracket_content is None:
-            break
-            
-        # 괄호 내용 평가 (괄호 제거)
-        inner_query = bracket_content[1:-1]
-        inner_result = match_logic(cell, inner_query)
-        
-        # 평가 결과를 문자열로 변환하여 쿼리에 대체
-        query = query[:start] + str(inner_result).lower() + query[end:]
+    # 쿼리 파싱
+    parsed_query = parse_query(query)
     
-    # 괄호가 없는 최종 쿼리 평가
-    return evaluate_simple_query(cell, query)
+    # 토큰화
+    tokens = tokenize_query(parsed_query)
+    
+    # 표현식 평가
+    return evaluate_expression(cell, tokens)
 
 def process_pdf(file, query):
+    """PDF 파일 처리"""
     results = []
-    parsed_query = parse_query(query)
     with pdfplumber.open(file) as pdf:
         for page_num, page in enumerate(pdf.pages, 1):
             tables = page.extract_tables()
             for table_num, table in enumerate(tables, 1):
                 for row_num, row in enumerate(table, 1):
                     cell_texts = [str(cell) if cell else '' for cell in row]
-                    if any(match_logic(cell, parsed_query) for cell in cell_texts):
-                        # 내용 컬럼을 문자열로 단순화
+                    if any(match_logic(cell, query) for cell in cell_texts):
                         results.append({
                             '페이지': page_num,
                             '테이블': table_num,
@@ -152,7 +182,6 @@ def process_pdf(file, query):
 def process_excel(file, query, selected_columns=None):
     """엑셀 파일 처리: 선택된 컬럼에서만 키워드 검색"""
     df = pd.read_excel(file)
-    parsed_query = parse_query(query)
     
     # 선택된 컬럼이 없으면 모든 컬럼 사용
     if not selected_columns:
@@ -162,7 +191,7 @@ def process_excel(file, query, selected_columns=None):
     def search_row(row):
         # 선택된 컬럼의 값만 문자열로 변환하여 검색
         row_text = ' '.join(str(row[col]).strip() for col in selected_columns if pd.notna(row[col]))
-        return match_logic(row_text, parsed_query)
+        return match_logic(row_text, query)
     
     mask = df.apply(search_row, axis=1)
     
