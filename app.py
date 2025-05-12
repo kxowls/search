@@ -13,6 +13,17 @@ st.set_page_config(
     layout="wide"
 )
 
+# 캐시 데코레이터 추가
+@st.cache_data
+def load_excel(file):
+    """엑셀 파일을 로드하고 캐시합니다."""
+    return pd.read_excel(file)
+
+@st.cache_data
+def get_columns(df):
+    """데이터프레임의 컬럼 목록을 반환하고 캐시합니다."""
+    return df.columns.tolist()
+
 def split_keywords(keyword_text):
     """키워드 문자열을 분리하여 리스트로 반환"""
     # 쉼표, 공백, 기호 등으로 분리
@@ -116,15 +127,19 @@ def process_pdf(file, query):
                         })
     return pd.DataFrame(results)
 
-def process_excel(file, query):
-    """엑셀 파일 처리: 키워드가 포함된 행 전체 출력"""
+def process_excel(file, query, selected_columns=None):
+    """엑셀 파일 처리: 선택된 컬럼에서만 키워드 검색"""
     df = pd.read_excel(file)
     parsed_query = parse_query(query)
     
+    # 선택된 컬럼이 없으면 모든 컬럼 사용
+    if not selected_columns:
+        selected_columns = df.columns.tolist()
+    
     # 각 행에 대해 검색 수행
     def search_row(row):
-        # 각 셀의 값을 문자열로 변환하고 공백을 포함한 원본 텍스트로 검색
-        row_text = ' '.join(str(cell).strip() for cell in row if pd.notna(cell))
+        # 선택된 컬럼의 값만 문자열로 변환하여 검색
+        row_text = ' '.join(str(row[col]).strip() for col in selected_columns if pd.notna(row[col]))
         return match_logic(row_text, parsed_query)
     
     mask = df.apply(search_row, axis=1)
@@ -166,29 +181,65 @@ def main():
     
     uploaded_file = st.file_uploader("파일을 업로드하세요", type=['pdf', 'xlsx', 'xls'])
     query = st.text_input("검색할 키워드를 입력하세요 (연산자: &, |, !, \"\", ())")
-    if uploaded_file and query:
+    
+    # 엑셀 파일인 경우 컬럼 선택 기능 추가
+    selected_columns = None
+    if uploaded_file and uploaded_file.name.endswith(('.xlsx', '.xls')):
+        # 캐시된 함수를 사용하여 엑셀 파일 로드
+        df = load_excel(uploaded_file)
+        columns = get_columns(df)
+        
+        # 컬럼 선택 UI
+        st.subheader("🔍 검색할 컬럼 선택")
+        
+        # 컬럼 선택을 위한 multiselect
+        selected_columns = st.multiselect(
+            "검색할 컬럼을 선택하세요 (여러 개 선택 가능)",
+            options=columns,
+            default=columns,
+            key="column_selector"
+        )
+        
+        # 선택된 컬럼이 없을 경우 경고
+        if not selected_columns:
+            st.warning("최소 하나 이상의 컬럼을 선택해주세요.")
+        else:
+            st.success(f"선택된 컬럼: {', '.join(selected_columns)}")
+    
+    # 검색 버튼 추가
+    search_button = st.button("🔍 검색하기", type="primary")
+    
+    # 검색 버튼이 클릭되었을 때만 검색 실행
+    if search_button and uploaded_file and query:
         try:
             if uploaded_file.name.endswith('.pdf'):
                 df = process_pdf(uploaded_file, query)
             else:
-                df = process_excel(uploaded_file, query)
-            if len(df) > 0:
-                st.success(f"검색 결과: {len(df)}개의 항목을 찾았습니다.")
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
-                output.seek(0)
-                st.download_button(
-                    label="Excel로 다운로드",
-                    data=output,
-                    file_name="검색결과.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.warning("검색 결과가 없습니다.")
+                if not selected_columns:
+                    st.warning("엑셀 파일의 경우 검색할 컬럼을 선택해주세요.")
+                else:
+                    df = process_excel(uploaded_file, query, selected_columns)
+                    if len(df) > 0:
+                        st.success(f"검색 결과: {len(df)}개의 항목을 찾았습니다.")
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False)
+                        output.seek(0)
+                        st.download_button(
+                            label="Excel로 다운로드",
+                            data=output,
+                            file_name="검색결과.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    else:
+                        st.warning("검색 결과가 없습니다.")
         except Exception as e:
             st.error(f"오류가 발생했습니다: {str(e)}")
+    elif search_button and not uploaded_file:
+        st.warning("파일을 업로드해주세요.")
+    elif search_button and not query:
+        st.warning("검색어를 입력해주세요.")
 
 if __name__ == "__main__":
     main() 
