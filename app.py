@@ -56,11 +56,15 @@ def parse_query(query):
     query = query.replace('＆', '&')
     query = query.replace('！', '!')
     
-    # NOT 연산자 변환 (! -> -)
-    query = re.sub(r'!(\w+)', r'-\1', query)
-    
     # 공백 제거
     query = re.sub(r'\s+', '', query)
+    
+    # 연속된 NOT 연산자 처리
+    while '!!' in query:
+        query = query.replace('!!', '')
+    
+    # NOT 연산자 변환 (! -> -)
+    query = re.sub(r'!(\w+)', r'-\1', query)
     
     return query
 
