@@ -53,6 +53,8 @@ def parse_query(query):
     """검색어 파싱: 논리 연산자 변환"""
     # NOT 연산자 변환 (! -> -)
     query = re.sub(r'!(\w+)', r'-\1', query)
+    # 특수 기호 변환 (∣ -> |)
+    query = query.replace('∣', '|')
     return query
 
 def is_near(text, a, b, window=5):
@@ -69,35 +71,36 @@ def is_near(text, a, b, window=5):
                 return True
     return False
 
-def match_logic(cell, query):
-    """검색 로직: 논리 연산자 처리"""
+def extract_innermost_brackets(query):
+    """가장 안쪽의 괄호와 그 내용을 찾아서 반환합니다."""
+    pattern = r'\([^()]*\)'
+    match = re.search(pattern, query)
+    if match:
+        return match.group(), match.start(), match.end()
+    return None, -1, -1
+
+def evaluate_simple_query(cell, query):
+    """단순 쿼리 평가: 괄호가 없는 쿼리를 평가합니다."""
     cell = normalize_text(str(cell))
-    
-    # 괄호 처리
-    if '(' in query and ')' in query:
-        def replace_brackets(match):
-            inner_query = match.group(1)
-            return str(match_logic(cell, inner_query))
-        query = re.sub(r'\((.*?)\)', replace_brackets, query)
     
     # NOT
     if '-' in query:
         parts = [p.strip() for p in query.split('-')]
         must = parts[0]
         nots = parts[1:]
-        if not match_logic(cell, must):
+        if not evaluate_simple_query(cell, must):
             return False
         return not any(normalize_text(n) in cell for n in nots)
     
     # AND
     if '&' in query:
         parts = [p.strip() for p in query.split('&')]
-        return all(normalize_text(part) in cell for part in parts)
+        return all(evaluate_simple_query(cell, part) for part in parts)
     
     # OR
     if '|' in query:
         parts = [p.strip() for p in query.split('|')]
-        return any(normalize_text(part) in cell for part in parts)
+        return any(evaluate_simple_query(cell, part) for part in parts)
     
     # 구문 검색 (정확한 문구)
     if query.startswith('"') and query.endswith('"'):
@@ -107,6 +110,25 @@ def match_logic(cell, query):
     # 단일 키워드 (부분 문자열 매칭)
     query = normalize_text(query.strip())
     return query in cell
+
+def match_logic(cell, query):
+    """검색 로직: 중첩된 논리 연산자 처리"""
+    # 괄호가 남아 있는 동안 계속 처리
+    while '(' in query and ')' in query:
+        # 가장 안쪽 괄호와 그 내용을 찾습니다
+        bracket_content, start, end = extract_innermost_brackets(query)
+        if bracket_content is None:
+            break
+            
+        # 괄호 내용 평가 (괄호 제거)
+        inner_query = bracket_content[1:-1]
+        inner_result = match_logic(cell, inner_query)
+        
+        # 평가 결과를 문자열로 변환하여 쿼리에 대체
+        query = query[:start] + str(inner_result).lower() + query[end:]
+    
+    # 괄호가 없는 최종 쿼리 평가
+    return evaluate_simple_query(cell, query)
 
 def process_pdf(file, query):
     results = []
@@ -169,6 +191,7 @@ def main():
     - 부분 문자열도 검색됩니다 (예: '파이썬'으로 '파이썬프로그래밍' 검색 가능)
     - 엑셀 파일 검색 시 키워드가 포함된 행 전체가 출력됩니다
     - 여러 연산자를 조합하여 사용할 수 있습니다
+    - 복잡한 논리 연산 가능: `(기업가 & !한빛) | (기업가 & 창업)`
     
     **📝 실제 사용 예시**
     1. 파이썬 관련 모든 내용: `파이썬`
@@ -177,6 +200,7 @@ def main():
     4. 파이썬은 포함하되 자바는 제외: `파이썬 & !자바`
     5. 정확한 책 제목 검색: `"혼자 공부하는 파이썬"`
     6. 복잡한 조건 검색: `(파이썬 | 한빛) & (기초 | 입문)`
+    7. 기업가 관련 내용 중 한빛 제외 또는 창업 포함: `(기업가 & !한빛) | (기업가 & 창업)`
     """)
     
     uploaded_file = st.file_uploader("파일을 업로드하세요", type=['pdf', 'xlsx', 'xls'])
