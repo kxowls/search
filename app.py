@@ -63,9 +63,6 @@ def parse_query(query):
     while '!!' in query:
         query = query.replace('!!', '')
     
-    # NOT 연산자 변환 (! -> -)
-    query = re.sub(r'!(\w+)', r'-\1', query)
-    
     return query
 
 def is_near(text, a, b, window=5):
@@ -85,7 +82,7 @@ def is_near(text, a, b, window=5):
 def tokenize_query(query):
     """쿼리를 토큰으로 분리"""
     # 괄호, 연산자, 키워드를 분리
-    pattern = r'([()&|!-])|([^()&|!-]+)'
+    pattern = r'([()&|!])|([^()&|!]+)'
     tokens = []
     for match in re.finditer(pattern, query):
         token = match.group(1) or match.group(2)
@@ -99,7 +96,10 @@ def evaluate_expression(cell, tokens):
     stack = []
     operators = []
     
-    for token in tokens:
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        
         if token == '(':
             operators.append(token)
         elif token == ')':
@@ -116,6 +116,13 @@ def evaluate_expression(cell, tokens):
                     stack.append(a or b)
             if operators and operators[-1] == '(':
                 operators.pop()
+        elif token == '!':
+            # NOT 연산자 처리
+            if i + 1 < len(tokens):
+                next_token = tokens[i + 1]
+                if next_token not in ['&', '|', '(', ')']:
+                    stack.append(normalize_text(next_token) not in cell)
+                    i += 1  # 다음 토큰 건너뛰기
         elif token in ['&', '|']:
             while operators and operators[-1] != '(' and operators[-1] in ['&', '|']:
                 op = operators.pop()
@@ -128,10 +135,6 @@ def evaluate_expression(cell, tokens):
                     a = stack.pop()
                     stack.append(a or b)
             operators.append(token)
-        elif token.startswith('-'):
-            # NOT 연산
-            keyword = token[1:]
-            stack.append(normalize_text(keyword) not in cell)
         elif token.startswith('"') and token.endswith('"'):
             # 정확한 문구 검색
             phrase = normalize_text(token[1:-1])
@@ -139,6 +142,8 @@ def evaluate_expression(cell, tokens):
         else:
             # 일반 키워드 검색
             stack.append(normalize_text(token) in cell)
+        
+        i += 1
     
     # 남은 연산자 처리
     while operators:
